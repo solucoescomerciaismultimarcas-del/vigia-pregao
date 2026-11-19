@@ -64,31 +64,51 @@ def diagnostico(compra):
     linhas.append("base: " + base)
     linhas.append("scripts: " + ", ".join(scripts))
 
-    achados = set()
-    padrao = re.compile(
-        r'["\'`]((?:https?://[^"\'`\s]{0,120})?/?[A-Za-z0-9_\-./{}$]*'
-        r'(?:mensag|chat|comprasnet-[a-z\-]+|/public/v\d|/v\d/)[^"\'`\s]{0,140})["\'`]', re.I)
-    for src in scripts[:8]:
-        url = src if src.startswith("http") else f"{CNET}{base.rstrip('/')}/{src.lstrip('/')}"
+    def url_js(src):
+        if src.startswith("http"):
+            return src
+        if src.startswith("/"):
+            return CNET + src
+        return f"{CNET}{base.rstrip('/')}/{src}"
+
+    achados, contextos = set(), []
+    fila = list(scripts)
+    vistos = set()
+    while fila and len(vistos) < 45:
+        src = fila.pop(0)
+        nome = src.split("/")[-1]
+        if nome in vistos:
+            continue
+        vistos.add(nome)
         try:
-            st, ct, body = baixar(url, timeout=40)
+            st, ct, body = baixar(url_js(src if "/" in src else base + src), timeout=40)
             js = body.decode("utf-8", "replace")
-            linhas.append(f"js {src}: HTTP {st} {len(body)} bytes")
-            for m in padrao.finditer(js):
-                t = m.group(1)
-                if len(t) > 6 and not t.endswith((".png", ".svg", ".css", ".woff", ".woff2")):
-                    achados.add(t)
-            for m in re.finditer(r'.{0,120}(mensage[mn]s?|chat).{0,160}', js, re.I):
-                if "http" in m.group(0) or "/v" in m.group(0):
-                    achados.add("CTX: " + m.group(0).replace("\n", " ")[:300])
         except Exception as e:
-            linhas.append(f"js {src}: ERRO {erro_txt(e)}")
+            linhas.append(f"js {nome}: ERRO {erro_txt(e)}")
+            continue
+        if js.lstrip().startswith("<"):
+            linhas.append(f"js {nome}: veio HTML em vez de JS ({len(body)} bytes)")
+            continue
+        n_ctx = 0
+        for m in re.finditer(r'chunk-[A-Z0-9]+\.js', js):
+            if m.group(0) not in vistos:
+                fila.append(m.group(0))
+        for m in re.finditer(r'["\'`]([^"\'`\s]{0,80}(?:comprasnet-[a-z\-]+|/chat|mensage[mn])[^"\'`\s]{0,120})["\'`]', js, re.I):
+            achados.add(m.group(1))
+        for m in re.finditer(r'.{0,200}(comprasnet-mensagem|/chat/|chat\b).{0,260}', js):
+            if n_ctx < 12:
+                contextos.append(f"[{nome}] " + m.group(0).replace("\n", " ")[:460])
+                n_ctx += 1
+        linhas.append(f"js {nome}: {len(body)} bytes, {n_ctx} trechos")
 
     linhas.append("")
     linhas.append(f"== caminhos encontrados ({len(achados)}):")
-    for t in sorted(achados)[:300]:
+    for t in sorted(achados)[:200]:
         linhas.append("  " + t)
-
+    linhas.append("")
+    linhas.append(f"== trechos do codigo ({len(contextos)}):")
+    for t in contextos[:60]:
+        linhas.append("  " + t)
     linhas.append("")
     linhas.append("== testes diretos:")
     candidatos = [
@@ -107,7 +127,14 @@ def diagnostico(compra):
             linhas.append(f"  {st} {ct[:30]} {u}")
             linhas.append("     " + body[:400].decode("utf-8", "replace").replace("\n", " "))
         except urllib.error.HTTPError as e:
+            corpo = ""
+            try:
+                corpo = e.read()[:600].decode("utf-8", "replace").replace("\n", " ")
+            except Exception:
+                pass
             linhas.append(f"  {e.code} {u}")
+            if corpo:
+                linhas.append("     " + corpo)
         except Exception as e:
             linhas.append(f"  ERRO {erro_txt(e)} {u}")
     return "\n".join(linhas)
